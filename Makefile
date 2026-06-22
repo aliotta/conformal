@@ -9,5 +9,9 @@ run-projector:
 	python3 ./scripts/mlx_transform.py
 
 # Target to generate the loop GIFs
-run-gif-gen:
+run-asset-gen:
 	python3 ./scripts/gif_gen.py
+
+# Target to generate the loop GIFs
+prepare-asset:
+	python3 ./scripts/prepare_asset.py $(word 2, $(MAKECMDGOALS))

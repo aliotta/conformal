@@ -27,9 +27,26 @@ FOC_X = 640
 FOC_Y = 640
 SPEED = 0.5 
 
+# --- OPTIONAL JSON CONFIG LOAD ---
+CONFIG_FILE = os.path.join(ASSETS_DIR, "transform_config.json")
+if os.path.exists(CONFIG_FILE):
+    try:
+        import json
+        with open(CONFIG_FILE, 'r') as f:
+            cfg = json.load(f)
+            OUTER = cfg.get('Outer', OUTER)
+            INNER = cfg.get('Inner', INNER)
+            FOC_X = cfg.get('FocX', FOC_X)
+            FOC_Y = cfg.get('FocY', FOC_Y)
+            INPUT_FILE = cfg["AssetInput"]
+            print(f"GIF Generator using auto-config from {CONFIG_FILE}")
+    except Exception as e:
+        print(f"GIF Generator using hardcoded defaults: {e}")
+
+# Recalculate derived math
 ratio = OUTER / INNER
 log_ratio = np.log(ratio)
-loop_duration = log_ratio / SPEED 
+loop_duration = log_ratio / SPEED
 
 def get_droste_map(zoom, grid_h, grid_w, Y_GRID, X_GRID):
     eff_zoom = np.exp(np.log(max(zoom, 1e-10)) % log_ratio)
@@ -56,11 +73,7 @@ def get_droste_map(zoom, grid_h, grid_w, Y_GRID, X_GRID):
            (mag_warped * mx.sin(final_angle) * scaling_factor + FOC_Y)
 
 def generate_single_frame(h, w, zoom_val):
-    """Helper to generate a single processed frame at a specific zoom level."""
     Y_GRID_MX, X_GRID_MX = mx.meshgrid(mx.arange(h, dtype=mx.float32), mx.arange(w, dtype=mx.float32), indexing='ij')
-    dist_from_center = np.sqrt((np.array(X_GRID_MX) - w/2)**2 + (np.array(Y_GRID_MX) - h/2)**2)
-    mask = np.clip(1.5 - (dist_from_center / (w / 2.5)), 0, 1)
-    mask = cv2.GaussianBlur(mask, (51, 51), 0)[:, :, np.newaxis]
 
     mx1, my1 = get_droste_map(zoom_val, h, w, Y_GRID_MX, X_GRID_MX)
     mx2, my2 = get_droste_map(zoom_val / ratio, h, w, Y_GRID_MX, X_GRID_MX)
@@ -68,49 +81,84 @@ def generate_single_frame(h, w, zoom_val):
     
     f_low = cv2.remap(src_pixels, np.array(mx1), np.array(my1), cv2.INTER_LINEAR)
     f_high = cv2.remap(src_pixels, np.array(mx2), np.array(my2), cv2.INTER_LINEAR)
-    return (f_high * mask + f_low * (1 - mask)).astype(np.uint8)
+    
+    bgr_inner = f_high[:, :, :3]
+    alpha_inner = f_high[:, :, 3:] / 255.0
+    bgr_outer = f_low[:, :, :3]
+    
+    combined = (bgr_inner * alpha_inner + bgr_outer * (1.0 - alpha_inner)).astype(np.uint8)
+    return cv2.cvtColor(combined, cv2.COLOR_BGR2RGB)
 
 def save_static_png(filename, h, w):
     try:
         output_path = os.path.join(OUT_DIR, filename)
-        print(f"--- Saving Static PNG: {filename} ---")
-        # Generate the frame at the start of the loop (zoom = 1.0)
-        frame = generate_single_frame(h, w, 1.0)
-        Image.fromarray(frame).save(output_path)
+        print(f"\n--- Generating Static PNG: {filename} ---")
+        frame_rgb = generate_single_frame(h, w, 1.0)
+        Image.fromarray(frame_rgb).save(output_path)
         print(f"SUCCESS: Static frame saved to {output_path}")
     except Exception as e:
         print(f"FAILED Static PNG: {e}")
 
-def bake_gif(filename, h, w, fps, subrects, colors=256):
+def bake_sequence(filename, h, w, fps, subrects=False, colors=256):
     try:
         output_path = os.path.join(OUT_DIR, filename)
+        is_video = filename.endswith('.mp4')
         print(f"\n--- Baking {filename} ({w}x{h} @ {fps}fps) ---")
-        total_frames = int(loop_duration * fps)
         
+        total_frames = int(loop_duration * fps)
         frames = []
+        
+        writer = imageio.get_writer(output_path, fps=fps) if is_video else None
+        
         for i in range(total_frames):
             zoom = np.exp(SPEED * (i / fps))
-            frame = generate_single_frame(h, w, zoom)
-            frames.append(frame)
+            frame_rgb = generate_single_frame(h, w, zoom)
+            
+            if is_video:
+                writer.append_data(frame_rgb)
+            else:
+                frames.append(frame_rgb)
+                
             if i % 10 == 0: print(f"Progress: {i}/{total_frames}")
 
-        imageio.mimsave(output_path, frames, format='GIF', fps=fps, loop=0, 
-                        subrectangles=subrects, palettesize=colors, plugin='pillow')
+        if is_video:
+            writer.close()
+        else:
+            imageio.mimsave(output_path, frames, format='GIF', fps=fps, loop=0, 
+                            subrectangles=subrects, palettesize=colors, plugin='pillow')
+            
         print(f"SUCCESS: Saved to {output_path}")
     except Exception as e:
         print(f"FAILED {filename}: {e}")
 
 if __name__ == '__main__':
     try:
-        img = Image.open(INPUT_FILE).convert('RGB')
-        src_pixels = np.array(img)
+        # Load with Alpha channel (BGRA)
+        src_pixels = cv2.imread(INPUT_FILE, cv2.IMREAD_UNCHANGED)
+        if src_pixels is None:
+            raise FileNotFoundError(f"Could not find {INPUT_FILE}")
+            
+        if src_pixels.shape[2] == 3:
+            src_pixels = cv2.cvtColor(src_pixels, cv2.COLOR_BGR2BGRA)
+
+        base_name = os.path.splitext(os.path.basename(INPUT_FILE))[0]
         
-        # Output static frame first
-        save_static_png('eye_spiral_static.png', h=1080, w=1080)
+        # 1. STATIC PNG
+        save_static_png(f'{base_name}_static.png', h=1350, w=1080)
         
-        # Then proceed with animated GIFs
-        bake_gif('eye_spiral_reddit.gif', h=800, w=800, fps=30, subrects=False)
-        bake_gif('eye_spiral_discord.gif', h=400, w=400, fps=15, subrects=True)
-        bake_gif('eye_spiral_slack.gif', h=300, w=300, fps=10, subrects=True, colors=128)
-    except FileNotFoundError:
-        print(f"Error: Could not find {INPUT_FILE}")
+        # 2. iOS APP ICON (1024x1024, Opaque RGB)
+        print("\n--- Generating iOS App Icon ---")
+        icon_frame = generate_single_frame(1024, 1024, 1.0)
+        icon_img = Image.fromarray(icon_frame).convert("RGB")
+        icon_img.save(os.path.join(OUT_DIR, "AppIcon.png"))
+        print(f"SUCCESS: iOS Icon saved to {os.path.join(OUT_DIR, 'AppIcon.png')}")
+        
+        # 3. REDDIT HIGH-RES MP4
+        bake_sequence(f'{base_name}_reddit.mp4', h=1350, w=1080, fps=30)
+        
+        # 4. EXISTING GIFS
+        bake_sequence(f'{base_name}_discord.gif', h=400, w=400, fps=15, subrects=True)
+        bake_sequence(f'{base_name}_slack.gif', h=300, w=300, fps=10, subrects=True, colors=128)
+        
+    except Exception as e:
+        print(f"Error: {e}")

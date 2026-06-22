@@ -3,3 +3,4 @@ opencv-python
 mlx
 Pillow
 imageio
+imageio[ffmpeg]

@@ -1,2 +1,6 @@
 /private_assets
+/out
+/assets
+/preprocessed
+/captures
 .DS_STORE
