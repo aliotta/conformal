@@ -8,10 +8,10 @@ Set the Experience trackbar to switch between effects without restarting.
   3  Mobius      — inversion + vortex
   4  MobiusTypes — elliptic / hyperbolic / loxodromic / parabolic
 
-Keys: F = fullscreen toggle   Space = play/pause   M = mirror camera   Q = quit
+Keys: F = fullscreen toggle   Space = play/pause   M = mirror camera   O = open image   G = generate assets   Q = quit
 """
 
-import os, sys, subprocess, time
+import os, sys, subprocess, time, threading
 import numpy as np
 import cv2
 import mlx.core as mx
@@ -23,7 +23,7 @@ from camera_source import CameraSource, probe_cameras
 # ── paths ────────────────────────────────────────────────────────────────────
 BASE_DIR   = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ASSETS_DIR = os.path.join(BASE_DIR, "assets")
-INPUT_FILE = os.path.join(ASSETS_DIR, "centered_eye.png")
+INPUT_FILE = None
 
 DST_H, DST_W  = 800, 800
 MAIN_WINDOW   = "Escher"
@@ -38,23 +38,33 @@ if os.path.exists(CONFIG_FILE):
         with open(CONFIG_FILE) as f:
             cfg = json.load(f)
         DROSTE_DEFAULTS.update(cfg)
-        INPUT_FILE = cfg.get("AssetInput", INPUT_FILE)
+        INPUT_FILE = cfg.get("AssetInput", None)
         print(f"Loaded config: {cfg}")
     except Exception as e:
         print(f"Warning: could not parse config ({e})")
 
 # ── static image ─────────────────────────────────────────────────────────────
-try:
-    static_img = cv2.imread(INPUT_FILE, cv2.IMREAD_UNCHANGED)
-    if static_img is None:
-        raise FileNotFoundError(INPUT_FILE)
-    if static_img.shape[2] == 3:
-        static_img = cv2.cvtColor(static_img, cv2.COLOR_BGR2BGRA)
-    static_h, static_w = static_img.shape[:2]
-    # resized copy for non-Droste effects (they work in DST pixel space)
-    static_small = cv2.resize(static_img, (DST_W, DST_H))
-except Exception as e:
-    print(f"Error loading image: {e}"); exit()
+def _make_placeholder():
+    img = np.zeros((DST_H, DST_W, 4), dtype=np.uint8)
+    cv2.putText(img, "Press O to open an image", (DST_W//2 - 160, DST_H//2),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (180, 180, 180, 255), 2)
+    return img
+
+static_img = None
+if INPUT_FILE and os.path.exists(INPUT_FILE):
+    raw = cv2.imread(INPUT_FILE, cv2.IMREAD_UNCHANGED)
+    if raw is not None:
+        if raw.ndim == 2:
+            raw = cv2.cvtColor(raw, cv2.COLOR_GRAY2BGRA)
+        elif raw.shape[2] == 3:
+            raw = cv2.cvtColor(raw, cv2.COLOR_BGR2BGRA)
+        static_img = raw
+
+if static_img is None:
+    static_img = _make_placeholder()
+
+static_h, static_w = static_img.shape[:2]
+static_small = cv2.resize(static_img, (DST_W, DST_H))
 
 # ── output grid (shared by all effects) ──────────────────────────────────────
 Y_GRID, X_GRID = mx.meshgrid(
@@ -77,7 +87,7 @@ print(f"Screen: {SCREEN_W}x{SCREEN_H}")
 
 # ── cameras ───────────────────────────────────────────────────────────────────
 cams = probe_cameras()
-print(f"Cameras: {[(i, f'{w}x{h}') for i,w,h in cams]}")
+print(f"Cameras: {[(i, name, f'{w}x{h}') for i,name,w,h in cams]}")
 camera = CameraSource(DST_W, DST_H)
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -235,6 +245,29 @@ def tb(name, fallback=0):
 # Main loop
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _run_gif_gen(img, outer, inner, fov, src_stem="_gen_source"):
+    global gif_gen_status
+    try:
+        os.makedirs(ASSETS_DIR, exist_ok=True)
+        src_path = os.path.join(ASSETS_DIR, f"{src_stem}.png")
+        cv2.imwrite(src_path, img)
+        cfg = {"Outer": outer, "Inner": inner, "FOV": fov,
+               "FocX": img.shape[1] / 2, "FocY": img.shape[0] / 2, "AssetInput": src_path}
+        with open(CONFIG_FILE, 'w') as f:
+            json.dump(cfg, f, indent=4)
+        print("gif_gen: starting…")
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gif_gen.py")
+        subprocess.run([sys.executable, script], check=True)
+        gif_gen_status = "Done"
+        print("gif_gen: complete")
+    except Exception as e:
+        gif_gen_status = f"Error: {e}"
+        print(f"gif_gen error: {e}")
+
+gif_gen_running = False
+gif_gen_status  = ""
+opened_file_stem = "_gen_source"
+
 cv2.namedWindow(MAIN_WINDOW, cv2.WINDOW_NORMAL)
 setup_controls(0)
 
@@ -370,6 +403,12 @@ while True:
         cv2.putText(result, exp_label, (DST_W - 220, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 200), 2)
 
+        if gif_gen_status:
+            cv2.putText(result, gif_gen_status, (10, DST_H - 15),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (100, 255, 100), 2)
+            if gif_gen_status in ("Done",) or gif_gen_status.startswith("Error"):
+                gif_gen_running = False
+
         display = letterbox(result, SCREEN_W, SCREEN_H) if fullscreen else result
         cv2.imshow(MAIN_WINDOW, display)
 
@@ -389,6 +428,39 @@ while True:
             pass
     elif key == ord('m'):
         mirror = not mirror
+    elif key == ord('g'):
+        if not gif_gen_running:
+            outer = max(2, tb('Outer', DROSTE_DEFAULTS['Outer']))
+            inner = max(1, tb('Inner', DROSTE_DEFAULTS['Inner']))
+            fov   = max(1, tb('FOV',   DROSTE_DEFAULTS['FOV']))
+            gif_gen_running = True
+            gif_gen_status  = "Generating…"
+            t = threading.Thread(target=_run_gif_gen,
+                                 args=(static_img.copy(), outer, inner, fov, opened_file_stem), daemon=True)
+            t.start()
+    elif key == ord('o'):
+        try:
+            result = subprocess.run(
+                ['osascript', '-e',
+                 'POSIX path of (choose file with prompt "Choose Image"'
+                 ' of type {"public.image", "com.adobe.pdf"})'],
+                capture_output=True, text=True
+            )
+            path = result.stdout.strip() if result.returncode == 0 else None
+            if path:
+                opened_file_stem = os.path.splitext(os.path.basename(path))[0]
+                img = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+                if img is not None:
+                    if img.ndim == 2:
+                        img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGRA)
+                    elif img.shape[2] == 3:
+                        img = cv2.cvtColor(img, cv2.COLOR_BGR2BGRA)
+                    static_img   = img
+                    static_h, static_w = img.shape[:2]
+                    static_small = cv2.resize(img, (DST_W, DST_H))
+                    zoom = 1.0
+        except Exception as e:
+            print(f"File dialog error: {e}")
 
 camera.release()
 cv2.destroyAllWindows()

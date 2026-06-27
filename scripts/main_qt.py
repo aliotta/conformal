@@ -22,7 +22,7 @@ try:
         QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
         QLabel, QComboBox, QSlider, QPushButton, QLineEdit,
         QStackedWidget, QFrame, QSizePolicy, QMessageBox, QCheckBox,
-        QScrollArea,
+        QScrollArea, QFileDialog,
     )
     from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
     from PyQt6.QtGui import QImage, QPixmap
@@ -518,6 +518,11 @@ class ControlsWindow(QMainWindow):
         self._src_combo.currentIndexChanged.connect(self._on_src_change)
         pv.addWidget(self._src_combo)
 
+        self._img_btn = QPushButton("Choose Image…")
+        self._img_btn.setObjectName("imgBtn")
+        self._img_btn.clicked.connect(self._choose_image)
+        pv.addWidget(self._img_btn)
+
         self._mirror_chk = QCheckBox("Mirror camera")
         self._mirror_chk.toggled.connect(lambda v: self._params.update({"mirror": v}))
         pv.addWidget(self._mirror_chk)
@@ -676,6 +681,26 @@ class ControlsWindow(QMainWindow):
         return f
 
     # ── event handlers ─────────────────────────────────────────────────────────
+    def _choose_image(self):
+        global STATIC_FULL, STATIC_SMALL, STATIC_H, STATIC_W
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Choose Image", "",
+            "Images (*.png *.jpg *.jpeg *.tiff *.bmp *.webp)")
+        if not path:
+            return
+        img = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+        if img is None:
+            QMessageBox.warning(self, "Image", f"Could not load:\n{path}")
+            return
+        if img.ndim == 2:
+            img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGRA)
+        elif img.shape[2] == 3:
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2BGRA)
+        STATIC_FULL  = img
+        STATIC_H, STATIC_W = img.shape[:2]
+        STATIC_SMALL = cv2.resize(img, (DST_W, DST_H))
+        self._worker._zoom = 1.0
+
     def _toggle_preview_fullscreen(self):
         if not self._preview.isVisible():
             self._preview.show()
@@ -860,6 +885,9 @@ class ControlsWindow(QMainWindow):
             }
             QPushButton#fsBtn   { background: #374151; color: #e0e0e0; }
             QPushButton#showBtn { background: #2c2c2c; color: #aaa;
+                                  border: 1px solid #3a3a3a; min-height: 30px;
+                                  font-size: 12px; padding: 5px; }
+            QPushButton#imgBtn  { background: #2c2c2c; color: #aaa;
                                   border: 1px solid #3a3a3a; min-height: 30px;
                                   font-size: 12px; padding: 5px; }
             QPushButton#photoBtn  { background: #2563eb; color: #fff; }
